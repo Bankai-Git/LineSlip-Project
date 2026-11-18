@@ -103,7 +103,7 @@ sudo -u postgres createdb --owner=lineslip lineslip
 ### 3. ดาวน์โหลดโปรเจกต์และตั้งค่า
 
 ```bash
-git clone <GITHUB_REPOSITORY_URL>
+git clone https://github.com/Bankai-Git/LineSlip-Project.git
 cd LineSlip-Project
 npm ci
 cp .env.example .env
@@ -179,7 +179,7 @@ CREATE DATABASE lineslip OWNER lineslip;
 ### 3. ดาวน์โหลดโปรเจกต์และตั้งค่า
 
 ```powershell
-git clone <GITHUB_REPOSITORY_URL>
+git clone https://github.com/Bankai-Git/LineSlip-Project.git
 cd LineSlip-Project
 npm ci
 Copy-Item .env.example .env
