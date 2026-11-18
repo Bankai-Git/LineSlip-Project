@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ข้อมูลรายการ | LineSlip</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f5f5f2; color: #252522; }
+    body { margin: 0 auto; max-width: 1200px; padding: 24px 16px 56px; }
+    header, .filters, .table-wrap { background: #fff; border: 1px solid #e2e1dc; border-radius: 12px; padding: 18px; margin-bottom: 14px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    h1 { font-size: 1.35rem; margin: 0; }
+    p { color: #686862; margin: 6px 0 0; }
+    a { color: #34347f; }
+    .filters { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+    label { display: grid; gap: 5px; font-size: .9rem; }
+    input, select, button { border: 1px solid #d4d3ce; border-radius: 8px; font: inherit; padding: 8px 10px; }
+    button { color: white; background: #34347f; border: 0; cursor: pointer; }
+    button.delete { background: #a32828; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .table-wrap { overflow-x: auto; padding: 0; }
+    table { border-collapse: collapse; min-width: 1580px; width: 100%; font-size: .88rem; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #ecebe6; text-align: left; white-space: nowrap; }
+    th { background: #f8f8f5; position: sticky; top: 0; z-index: 1; }
+    tbody tr:hover { background: #fafaf8; }
+    .status { font-weight: 650; }
+    .status.pending { color: #946200; }
+    .status.confirmed { color: #267346; }
+    .meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 2px; color: #686862; }
+    .pagination { display: flex; align-items: center; gap: 8px; }
+    #error { color: #a32828; }
+    @media (max-width: 600px) { body { padding: 12px 8px 32px; } header { align-items: start; flex-direction: column; } .filters { align-items: stretch; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>แถวข้อมูลใน PostgreSQL</h1>
+      <p>ข้อมูลจากตาราง slips จำกัดเฉพาะ LINE user ที่ตั้งค่าไว้ใน Dashboard</p>
+    </div>
+    <a href="/dashboard">กลับไปหน้าสรุปยอด</a>
+  </header>
+
+  <form class="filters" id="filters">
+    <label>วันที่ (เว้นว่างเพื่อดูทุกวัน)<input id="date" type="date"></label>
+    <label>สถานะ
+      <select id="status">
+        <option value="all">ทั้งหมด</option>
+        <option value="pending">pending</option>
+        <option value="confirmed">confirmed</option>
+      </select>
+    </label>
+    <button type="submit">ค้นหา</button>
+  </form>
+
+  <div class="meta">
+    <span id="count">กำลังโหลด…</span>
+    <div class="pagination">
+      <button id="previous" type="button">ก่อนหน้า</button>
+      <span id="page">หน้า 1</span>
+      <button id="next" type="button">ถัดไป</button>
+    </div>
+  </div>
+  <p id="error" role="alert"></p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>LINE userId</th><th>สถานะ</th><th>จำนวนเงิน</th><th>วันที่ทำรายการ</th><th>เวลา</th>
+        <th>เลขอ้างอิง</th><th>รายการ</th><th>คำนำหน้าผู้โอน</th><th>ชื่อผู้โอน</th><th>นามสกุลผู้โอน</th>
+        <th>คำนำหน้าผู้รับ</th><th>ชื่อผู้รับ</th><th>นามสกุลผู้รับ</th><th>บริษัทผู้รับ</th><th>ธนาคารผู้โอน</th><th>ธนาคารผู้รับ</th><th>OCR confidence</th><th>messageId</th>
+        <th>webhookEventId</th><th>receivedAt</th><th>createdAt</th><th>confirmedAt</th><th>สลิป</th><th>จัดการ</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <script>
+    const columns = [
+      ['id', 'id'], ['line_user_id', 'line_user_id'], ['status', 'status'], ['amount', 'amount'],
+      ['transaction_date', 'transaction_date'], ['transaction_time', 'transaction_time'],
+      ['reference_no', 'reference_no'], ['transaction_type', 'transaction_type'],
+      ['sender_prefix', 'sender_prefix'], ['sender_first_name', 'sender_first_name'], ['sender_last_name', 'sender_last_name'],
+      ['recipient_prefix', 'recipient_prefix'], ['recipient_first_name', 'recipient_first_name'],
+      ['recipient_last_name', 'recipient_last_name'], ['recipient_company_name', 'recipient_company_name'],
+      ['sender_bank_name', 'sender_bank_name'], ['recipient_bank_name', 'recipient_bank_name'],
+      ['ocr_confidence', 'ocr_confidence'], ['message_id', 'message_id'], ['webhook_event_id', 'webhook_event_id'],
+      ['received_at', 'received_at'], ['created_at', 'created_at'], ['confirmed_at', 'confirmed_at'],
+    ];
+    let currentPage = 1;
+
+    function display(value) {
+      if (value == null || value === '') return '—';
+      return String(value);
+    }
+
+    async function loadRows() {
+      const params = new URLSearchParams({ status: document.querySelector('#status').value, page: String(currentPage) });
+      const date = document.querySelector('#date').value;
+      if (date) params.set('date', date);
+      const error = document.querySelector('#error');
+      error.textContent = '';
+      try {
+        const response = await fetch(`/api/dashboard/slips?${params}`, { cache: 'no-store' });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error?.message || 'โหลดข้อมูลไม่สำเร็จ');
+        const body = document.querySelector('#rows');
+        body.replaceChildren();
+        for (const row of payload.rows) {
+          const tr = document.createElement('tr');
+          for (const [key] of columns) {
+            const td = document.createElement('td');
+            td.textContent = display(row[key]);
+            if (key === 'status') td.className = `status ${row.status}`;
+            tr.append(td);
+          }
+          const slipCell = document.createElement('td');
+          if (row.image_path) {
+            const slipLink = document.createElement('a');
+            slipLink.href = `/api/dashboard/slips/${encodeURIComponent(row.id)}/image`;
+            slipLink.target = '_blank'; slipLink.rel = 'noopener'; slipLink.textContent = 'ดูสลิป';
+            slipCell.append(slipLink);
+          } else slipCell.textContent = '—';
+          tr.append(slipCell);
+          const actionCell = document.createElement('td');
+          const deleteButton = document.createElement('button');
+          deleteButton.className = 'delete';
+          deleteButton.type = 'button';
+          deleteButton.textContent = 'ลบ';
+          deleteButton.setAttribute('aria-label', `ลบรายการ ${row.id}`);
+          deleteButton.addEventListener('click', async () => {
+            const confirmed = window.confirm(`ต้องการลบรายการ #${row.id} จำนวนเงิน ${row.amount} บาทหรือไม่?\n\nข้อมูลนี้จะถูกลบถาวรและกู้คืนไม่ได้`);
+            if (!confirmed) return;
+            deleteButton.disabled = true;
+            error.textContent = '';
+            try {
+              const deleteResponse = await fetch(`/api/dashboard/slips/${encodeURIComponent(row.id)}`, {
+                method: 'DELETE',
+                cache: 'no-store',
+              });
+              if (!deleteResponse.ok) {
+                const result = await deleteResponse.json().catch(() => ({}));
+                throw new Error(result.error?.message || 'ลบรายการไม่สำเร็จ');
+              }
+              if (body.children.length === 1 && currentPage > 1) currentPage -= 1;
+              await loadRows();
+            } catch (cause) {
+              error.textContent = cause.message;
+              deleteButton.disabled = false;
+            }
+          });
+          actionCell.append(deleteButton);
+          tr.append(actionCell);
+          body.append(tr);
+        }
+        document.querySelector('#count').textContent = `ทั้งหมด ${payload.total.toLocaleString('th-TH')} แถว · แสดง ${payload.rows.length} แถวต่อหน้า`;
+        document.querySelector('#page').textContent = `หน้า ${payload.page}`;
+        document.querySelector('#previous').disabled = payload.page <= 1;
+        document.querySelector('#next').disabled = payload.page * payload.pageSize >= payload.total;
+      } catch (cause) {
+        error.textContent = cause.message;
+      }
+    }
+
+    document.querySelector('#filters').addEventListener('submit', (event) => {
+      event.preventDefault();
+      currentPage = 1;
+      loadRows();
+    });
+    document.querySelector('#previous').addEventListener('click', () => { currentPage -= 1; loadRows(); });
+    document.querySelector('#next').addEventListener('click', () => { currentPage += 1; loadRows(); });
+    loadRows();
+  </script>
+</body>
+</html>

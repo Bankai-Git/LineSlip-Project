@@ -1,0 +1,27 @@
+{
+  "name": "linejurnal",
+  "version": "1.0.0",
+  "description": "LINE slip OCR project",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "ocr": "node ocr.js",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^11.4.0",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "node-cron": "^4.6.0",
+    "pg": "^8.23.1",
+    "sharp": "^0.35.5",
+    "tesseract.js": "^7.0.0"
+  }
+}

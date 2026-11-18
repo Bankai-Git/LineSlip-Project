@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LineSlip Dashboard</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f5f5f2; color: #252522; }
+    body { margin: 0 auto; max-width: 880px; padding: 28px 18px 60px; }
+    header, .controls, .stats, .panel { background: #fff; border: 1px solid #e2e1dc; border-radius: 14px; padding: 20px; }
+    header { margin-bottom: 14px; }
+    h1 { font-size: 1.45rem; margin: 0 0 6px; }
+    p { color: #686862; margin: 6px 0; }
+    .controls { display: flex; gap: 10px; align-items: end; margin-bottom: 14px; flex-wrap: wrap; }
+    #period-controls { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+    label { display: grid; gap: 5px; font-size: .9rem; }
+    input, select, button { border: 1px solid #d4d3ce; border-radius: 8px; font: inherit; padding: 9px 12px; }
+    button { background: #34347f; color: white; border: 0; cursor: pointer; }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 14px; }
+    .stat { padding: 6px; }
+    .stat strong { display: block; font-size: 1.55rem; margin-top: 4px; }
+    .panel { margin-top: 14px; }
+    .bar-row { display: grid; grid-template-columns: 115px 1fr auto; gap: 12px; align-items: center; margin: 14px 0; }
+    .bar { height: 10px; background: #eeeee9; border-radius: 99px; overflow: hidden; }
+    .bar span { display: block; height: 100%; width: 0; background: #5147a8; border-radius: inherit; }
+    #error { color: #a32828; }
+    @media (max-width: 520px) { .bar-row { grid-template-columns: 85px 1fr; } .bar-row strong { grid-column: 2; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>สรุปยอดธุรกรรม</h1>
+    <p>แสดงเฉพาะรายการที่ยืนยันแล้ว ตัวเลขคำนวณจาก PostgreSQL</p>
+    <p><a href="/database">ดูแถวข้อมูลดิบในฐานข้อมูล</a></p>
+  </header>
+  <form class="controls" id="filters">
+    <label>ช่วงเวลา <select id="period"><option value="day">วัน</option><option value="week">สัปดาห์</option><option value="month">เดือน</option><option value="year">ปี</option></select></label>
+    <div id="period-controls"></div>
+    <button type="submit">ดูสรุป</button>
+  </form>
+  <p id="selected-period-label" aria-live="polite"></p>
+  <p id="error" role="alert"></p>
+  <section class="stats" aria-live="polite">
+    <div class="stat">ยอดธุรกรรมรวมที่ยืนยัน<strong id="total">—</strong></div>
+    <div class="stat">จำนวนธุรกรรม<strong id="count">—</strong></div>
+  </section>
+  <p id="period-label" aria-live="polite"></p>
+  <section class="panel">
+    <h2>สรุปแยกตามรายการ</h2>
+    <div id="transaction-types"></div>
+  </section>
+  <section class="panel">
+    <h2>กราฟยอดโอนและยอดรับ</h2>
+    <div id="flow-chart" aria-label="กราฟยอดโอนและยอดรับ"></div>
+  </section>
+  <section class="panel">
+    <h2>สรุป</h2>
+    <p id="narrative">เลือกช่วงเวลาเพื่อดูสรุป</p>
+  </section>
+  <script>
+    const transactionNames = { transfer: 'โอนเงิน', bill_payment: 'จ่ายบิล', receive: 'รับเงิน', other: 'อื่น ๆ' };
+    const periodInput = document.querySelector('#period');
+    const periodControls = document.querySelector('#period-controls');
+    const monthNames = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+    const weekdayNames = ['วันจันทร์', 'วันอังคาร', 'วันพุธ', 'วันพฤหัสบดี', 'วันศุกร์', 'วันเสาร์', 'วันอาทิตย์'];
+    let selectedDate = '';
+    let dateParts = { year: 2026, month: 1, week: 1, weekday: 0, decade: 2020 };
+    function formatMoney(value) {
+      const [whole, fraction = ''] = String(value).split('.');
+      return `${BigInt(whole || '0').toLocaleString('th-TH')}.${fraction.padEnd(2, '0').slice(0, 2)}`;
+    }
+    function dateString(year, month, day) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    function fromDate(value) {
+      const [year, month, day] = value.split('-').map(Number);
+      const first = new Date(Date.UTC(year, month - 1, 1));
+      const offset = (first.getUTCDay() + 6) % 7;
+      return { year, month, week: Math.floor((day - 1 + offset) / 7) + 1, weekday: (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7, decade: Math.floor(year / 10) * 10 };
+    }
+    function daysInMonth(year, month) { return new Date(Date.UTC(year, month, 0)).getUTCDate(); }
+    function weekStart(year, month, week) {
+      const first = new Date(Date.UTC(year, month - 1, 1));
+      const offset = (first.getUTCDay() + 6) % 7;
+      return new Date(Date.UTC(year, month - 1, 1 - offset + (week - 1) * 7));
+    }
+    function weekCount(year, month) {
+      const first = new Date(Date.UTC(year, month - 1, 1));
+      return Math.ceil((daysInMonth(year, month) + (first.getUTCDay() + 6) % 7) / 7);
+    }
+    function formatDate(date) { return `${date.getUTCDate()} ${monthNames[date.getUTCMonth()]} ${date.getUTCFullYear()}`; }
+    function makeSelect(labelText, value, options, onChange) {
+      const label = document.createElement('label');
+      label.textContent = labelText;
+      const select = document.createElement('select');
+      for (const option of options) {
+        const element = document.createElement('option');
+        element.value = String(option.value); element.textContent = option.label;
+        select.append(element);
+      }
+      select.value = String(value);
+      select.addEventListener('change', () => { onChange(select.value); renderPeriodControls(); });
+      label.append(select); periodControls.append(label);
+    }
+    function currentAnchor() {
+      const period = periodInput.value;
+      if (period === 'year') return dateString(dateParts.year, 1, 1);
+      if (period === 'month') return dateString(dateParts.year, dateParts.month, 1);
+      const start = weekStart(dateParts.year, dateParts.month, dateParts.week);
+      if (period === 'week') return dateString(start.getUTCFullYear(), start.getUTCMonth() + 1, start.getUTCDate());
+      const day = new Date(start); day.setUTCDate(day.getUTCDate() + dateParts.weekday);
+      return dateString(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate());
+    }
+    function renderPeriodControls() {
+      periodControls.replaceChildren();
+      const period = periodInput.value;
+      if (period === 'year') {
+        dateParts.decade = Math.floor(dateParts.year / 10) * 10;
+        makeSelect('ทศวรรษ', dateParts.decade, Array.from({ length: 21 }, (_, i) => { const start = 2000 + i * 10; return { value: start, label: `${start}–${start + 9}` }; }), (value) => { dateParts.decade = Number(value); dateParts.year = Number(value); });
+        makeSelect('ปีในทศวรรษ', dateParts.year, Array.from({ length: 10 }, (_, i) => ({ value: dateParts.decade + i, label: String(dateParts.decade + i) })), (value) => { dateParts.year = Number(value); });
+      } else {
+        makeSelect('ปี', dateParts.year, Array.from({ length: 201 }, (_, i) => ({ value: 2000 + i, label: String(2000 + i) })), (value) => { dateParts.year = Number(value); dateParts.decade = Math.floor(dateParts.year / 10) * 10; });
+        makeSelect('เดือน', dateParts.month, monthNames.map((label, i) => ({ value: i + 1, label })), (value) => { dateParts.month = Number(value); dateParts.week = Math.min(dateParts.week, weekCount(dateParts.year, dateParts.month)); });
+        if (period === 'week' || period === 'day') {
+          const count = weekCount(dateParts.year, dateParts.month);
+          dateParts.week = Math.min(dateParts.week, count);
+          makeSelect(period === 'week' ? 'สัปดาห์ของเดือน' : 'สัปดาห์', dateParts.week, Array.from({ length: count }, (_, i) => {
+            const start = weekStart(dateParts.year, dateParts.month, i + 1); const end = new Date(start); end.setUTCDate(end.getUTCDate() + 6);
+            return { value: i + 1, label: `สัปดาห์ที่ ${i + 1} (${formatDate(start)} – ${formatDate(end)})` };
+          }), (value) => { dateParts.week = Number(value); });
+          if (period === 'day') makeSelect('วันในสัปดาห์', dateParts.weekday, weekdayNames.map((label, i) => {
+            const date = weekStart(dateParts.year, dateParts.month, dateParts.week); date.setUTCDate(date.getUTCDate() + i);
+            return { value: i, label: `${label} · ${formatDate(date)}` };
+          }), (value) => { dateParts.weekday = Number(value); });
+        }
+      }
+      const anchor = currentAnchor();
+      selectedDate = anchor;
+      let description;
+      if (period === 'year') description = `ปี ${dateParts.year} · ทศวรรษ ${dateParts.decade}–${dateParts.decade + 9}`;
+      else if (period === 'month') description = `${monthNames[dateParts.month - 1]} ${dateParts.year}`;
+      else {
+        const start = weekStart(dateParts.year, dateParts.month, dateParts.week);
+        const end = new Date(start); end.setUTCDate(end.getUTCDate() + 6);
+        description = period === 'week'
+          ? `สัปดาห์ที่ ${dateParts.week} ของ ${monthNames[dateParts.month - 1]} ${dateParts.year} · ${formatDate(start)} – ${formatDate(end)}`
+          : `${weekdayNames[dateParts.weekday]} · ${formatDate(new Date(`${anchor}T00:00:00.000Z`))} · สัปดาห์ที่ ${dateParts.week} ของ ${monthNames[dateParts.month - 1]}`;
+      }
+      document.querySelector('#selected-period-label').textContent = `กำลังเลือก: ${description}`;
+    }
+    async function loadSummary(date, period) {
+      const error = document.querySelector('#error');
+      error.textContent = '';
+      try {
+        const params = new URLSearchParams({ period });
+        if (date) params.set('date', date);
+        const response = await fetch(`/api/dashboard/summary?${params}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error((await response.json()).error?.message || 'โหลดสรุปไม่สำเร็จ');
+        const summary = await response.json();
+        if (!date && summary.date) {
+          selectedDate = summary.date;
+          dateParts = fromDate(selectedDate);
+          renderPeriodControls();
+          if (periodInput.value !== period) return loadSummary(currentAnchor(), periodInput.value);
+        }
+        document.querySelector('#total').textContent = `${formatMoney(summary.totalAmount)} บาท`;
+        document.querySelector('#count').textContent = `${summary.transactionCount} รายการ`;
+        document.querySelector('#period-label').textContent = summary.periodLabel;
+        document.querySelector('#narrative').textContent = summary.narrative;
+        const transactionTypes = document.querySelector('#transaction-types');
+        transactionTypes.replaceChildren();
+        for (const item of summary.transactionTypes || []) {
+          const row = document.createElement('p');
+          row.textContent = `${transactionNames[item.transaction_type] || item.transaction_type}: ${formatMoney(item.total_amount)} บาท · ${item.transaction_count} รายการ`;
+          transactionTypes.append(row);
+        }
+        const flow = document.querySelector('#flow-chart');
+        flow.replaceChildren();
+        const flowTotals = { transfer: 0, receive: 0 };
+        for (const item of summary.transactionTypes || []) if (Object.hasOwn(flowTotals, item.transaction_type)) flowTotals[item.transaction_type] = Number(item.total_amount);
+        const flowMax = Math.max(1, ...Object.values(flowTotals));
+        for (const [type, label] of [['transfer', 'ยอดโอน'], ['receive', 'ยอดรับ']]) {
+          const row = document.createElement('div'); row.className = 'bar-row';
+          const name = document.createElement('span'); name.textContent = label;
+          const bar = document.createElement('div'); bar.className = 'bar';
+          const fill = document.createElement('span'); fill.style.width = `${flowTotals[type] ? Math.max(3, flowTotals[type] / flowMax * 100) : 0}%`; fill.style.background = type === 'transfer' ? '#5865d8' : '#29a36a'; bar.append(fill);
+          const total = document.createElement('strong'); total.textContent = `${formatMoney(String(flowTotals[type]))} บาท`;
+          row.append(name, bar, total); flow.append(row);
+        }
+      } catch (cause) {
+        error.textContent = cause.message;
+      }
+    }
+
+    document.querySelector('#filters').addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadSummary(currentAnchor(), periodInput.value);
+    });
+    periodInput.addEventListener('change', () => { dateParts = fromDate(selectedDate || currentAnchor()); renderPeriodControls(); });
+    dateParts = fromDate(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' }).format(new Date()));
+    renderPeriodControls();
+    loadSummary('', periodInput.value);
+  </script>
+</body>
+</html>

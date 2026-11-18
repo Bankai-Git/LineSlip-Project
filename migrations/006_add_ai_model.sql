@@ -1,0 +1,1 @@
+ALTER TABLE slips ADD COLUMN ai_model TEXT;
